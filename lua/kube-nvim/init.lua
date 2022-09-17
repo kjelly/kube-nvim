@@ -1,5 +1,16 @@
 local Job = require 'plenary.job'
 
+local function split(data, sep)
+  local parts = vim.split(data, sep, { trimempty = true })
+  parts = vim.tbl_filter(function(l)
+    if #l == 0 then
+      return false
+    end
+    return true
+  end, parts)
+  return parts
+end
+
 local function join(tbl, sep)
   local ret = ''
   for _, v in pairs(tbl) do
@@ -11,7 +22,8 @@ end
 local function formatKube(kind, json)
   local output = ''
   if kind == 'pods' then
-    output = string.format('%s %s %s %s', json.metadata.name, json.metadata.namespace, json.spec.nodeName, json.status.phase)
+    output = string.format('%s %s %s %s', json.metadata.name, json.metadata.namespace, json.spec.nodeName,
+      json.status.phase)
   elseif kind == 'nodes' then
     local reason = ''
     for _, v in pairs(json.status.conditions) do
@@ -29,31 +41,31 @@ local function parseLine(line)
   local kind = {}
   local and_filter = {}
   local or_filter = {}
-  for _, v in pairs(vim.split(line, ' ', {trimempty=true})) do
+  for _, v in pairs(vim.split(line, ' ', { trimempty = true })) do
     if v:sub(1, 1) == '@' then
-      kind[#kind+1] = v:sub(2, #v)
+      kind[#kind + 1] = v:sub(2, #v)
     elseif v:sub(1, 1) == '&' then
-      and_filter[#and_filter+1] = v:sub(2, #v)
+      and_filter[#and_filter + 1] = v:sub(2, #v)
     elseif v:sub(1, 1) == '#' then
-      or_filter[#or_filter+1] = v:sub(2, #v)
+      or_filter[#or_filter + 1] = v:sub(2, #v)
     end
   end
   return {
-      kind = kind,
-      filter = and_filter,
+    kind = kind,
+    filter = and_filter,
   }
 end
 
-local function KubeList(line ,opts)
-  vim.cmd('set filetype=kubelist')
+local function KubeList(line, opts)
+  -- vim.cmd('set filetype=kubelist')
   if opts == nil then
     opts = {
-      update_buffer = true
+      update_buffer = true,
+      wide = true,
     }
   end
   if line == nil then
     line = vim.api.nvim_get_current_line()
-    print(line)
   end
   local tmp = parseLine(line)
   local kinds = tmp.kind
@@ -63,10 +75,10 @@ local function KubeList(line ,opts)
   local buf_handle = vim.api.nvim_win_get_buf(0)
   local buf_var = vim.b[buf_handle]
   if buf_var.rev == nil then
-    buf_var.rev = { nontmpty = true}
+    buf_var.rev = { nontmpty = true }
   end
   if buf_var['job'] == nil then
-    buf_var['job'] = {count = 0}
+    buf_var['job'] = { count = 0 }
   end
   local result = vim.fn.searchpos('--- output ---')
   if opts.update_buffer == true then
@@ -82,9 +94,14 @@ local function KubeList(line ,opts)
   for i = 1, #kinds do
     local kind = kinds[i]
     buf_var.job.count = buf_var.job.count + 1
+    local args = { 'get', kind, '-A', '-o', 'wide' }
+    if opts.wide then
+      table.insert(args, '-o')
+      table.insert(args, 'wide')
+    end
     Job:new({
       command = 'kubectl',
-      args = { 'get', kind, '-A', '-o', 'json' },
+      args = args,
       env = {},
       on_exit = function(j, return_val)
         vim.defer_fn(function()
@@ -92,64 +109,91 @@ local function KubeList(line ,opts)
             vim.fn.appendbufline(buf_handle, '$', j:result())
             return
           end
-          local data = vim.json.decode(join(j:result(), ''))
-          local lines = {kind}
-          for _, v in pairs(data.items) do
-            line = formatKube(kind, v)
-            local matched = true
-            for _, vv in pairs(tmp.filter) do
-              if line:find(vv) == nil then
-                matched = false
+          local data = j:result()
+          local lines = { kind }
+          buf_var[kind] = split(data[1], ' ')
+          for index, v in pairs(data) do
+            if index == 1 then
+              lines[#lines + 1] = v
+            else
+              local matched = true
+              for _, vv in pairs(tmp.filter) do
+                if v:find(vv) == nil then
+                  matched = false
+                end
+              end
+              if matched then
+                lines[#lines + 1] = kind .. ' ' .. v
               end
             end
-            if matched then
-              lines[#lines + 1] = line
-              buf_var[v.metadata.name] = v
+          end
+          if #lines > 2 then
+            lines[#lines + 1] = ""
+            if opts.update_buffer == true then
+              vim.api.nvim_buf_set_lines(buf_handle, -1, -1, false, lines)
             end
           end
-          if opts.update_buffer == true then
-            vim.api.nvim_buf_set_lines(buf_handle, -1, -1, false, lines)
-          end
           buf_var.job.count = buf_var.job.count - 1
-          end, 100)
+        end, 100)
       end,
     }):start()
   end
   vim.wait(100)
 end
 
-local function kubeAction(action, template)
-  if template == nil then
-    template = 'kubectl %s -n %s %s/%s'
-  end
-  local current_line = vim.api.nvim_get_current_line()
-  local parts = vim.split(current_line, ' ', {trimempty=true})
-  local name = parts[1]
+local function parse_line_get_resource(line)
+  local parts = split(line, ' ')
+  local kind = parts[1]
+  local namespace = ''
+  local name = ''
 
   local buf_handle = vim.api.nvim_win_get_buf(0)
   local buf_var = vim.b[buf_handle]
-  local json = buf_var[name]
-  if json == nil then
-    local first_line = vim.api.nvim_buf_get_lines(buf_handle, 0, 1, false)[1]
-    KubeList(first_line, {update_buffer=false})
-    vim.wait(2000, function()
-      if buf_var.job.count == 0 and buf_var[name] ~= nil then
-        return true
-      end
-      return false
-    end, 500)
-    json = buf_var[name]
+  local no_namespace = true
+  if buf_var[kind] == nil then
+    no_namespace = #vim.tbl_filter(function(item)
+      return kind:find(item) ~= nil
+    end, { 'node' }) > 0
+  else
+    no_namespace = not vim.tbl_contains(buf_var[kind], 'NAMESPACE')
   end
-  local namespace = json.metadata.namespace
-  local kind = json.kind
-  vim.cmd("terminal " .. string.format(template, action,namespace, kind, name))
+
+
+  if no_namespace then
+    namespace = ''
+    name = parts[2]
+  else
+    namespace = parts[2]
+    name = parts[3]
+  end
+  return name, kind, namespace
+
 end
+
+local function kubeAction(action, template)
+  local current_line = vim.api.nvim_get_current_line()
+  local name, kind, namespace = parse_line_get_resource(current_line)
+  if template == nil then
+    if namespace == '' then
+      template = 'kubectl %s %s/%s'
+    else
+      template = 'kubectl %s -n %s %s/%s'
+    end
+  end
+
+  if namespace == '' then
+    vim.cmd("terminal " .. string.format(template, action, kind, name))
+  else
+    vim.cmd("terminal " .. string.format(template, action, namespace, kind, name))
+  end
+end
+
 M = {
   kubeList = KubeList,
-  kubeDescribe = function()kubeAction('describe') end,
-  kubeLogs = function()kubeAction('logs') end,
-  kubeEdit = function()kubeAction('edit') end,
-  kubeExec = function()kubeAction('exec', 'kubectl %s -it -n %s %s/%s -- sh') end,
+  kubeDescribe = function() kubeAction('describe') end,
+  kubeLogs = function() kubeAction('logs') end,
+  kubeEdit = function() kubeAction('edit') end,
+  kubeExec = function() kubeAction('exec', 'kubectl %s -it -n %s %s/%s -- sh') end,
   kubeAction = kubeAction,
   join = join,
 }
