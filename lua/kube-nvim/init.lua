@@ -45,7 +45,14 @@ local function parseLine(line)
       and_filter[#and_filter + 1] = v:sub(2, #v)
     elseif v:sub(1, 1) == '#' then
       or_filter[#or_filter + 1] = v:sub(2, #v)
+    elseif v:sub(1, 5) == 'kind:' then
+      kind[#kind + 1] = v:sub(6, #v)
+    elseif v:sub(1, 8) == 'include:' then
+      kind[#and_filter + 1] = v:sub(9, #v)
+    elseif v:sub(1, 8) == 'exclude:' then
+      kind[#or_filter + 1] = v:sub(9, #v)
     end
+
   end
   return { kind = kind, filter = and_filter }
 end
@@ -59,6 +66,7 @@ local function KubeList(line, opts)
   if kinds == nil or #kinds == 0 then return end
   local buf_handle = vim.api.nvim_win_get_buf(0)
   local buf_var = vim.b[buf_handle]
+  buf_var['kube-line'] = line
   if buf_var.rev == nil then buf_var.rev = { nontmpty = true } end
   if buf_var['job'] == nil then buf_var['job'] = { count = 0 } end
   local result = vim.fn.searchpos('--- output ---')
@@ -166,20 +174,53 @@ local function kubeAction(action, template)
   end
 end
 
+local function KubeRefresh()
+  local line = vim.b['kube-line']
+  if line == nil then return end
+  KubeList(line)
+end
+
+local function KubeAutoRefreshLoop()
+  if vim.b.auto == true then
+    KubeRefresh()
+    vim.defer_fn(KubeAutoRefreshLoop, 5000)
+  end
+end
+
+local function KubeAutoRefreshToggle()
+  if vim.b.auto == true then
+    vim.b.auto = false
+  else
+    vim.b.auto = true
+    KubeAutoRefreshLoop()
+  end
+end
+
 M = {
   kubeList = KubeList,
   kubeDescribe = function() kubeAction('describe') end,
   kubeLogs = function() kubeAction('logs') end,
   kubeEdit = function() kubeAction('edit') end,
   kubeExec = function() kubeAction('exec', 'kubectl %s -it -n %s %s/%s -- sh') end,
+  kubeRefresh = function() KubeRefresh() end,
+  kubeRefreshToggle = function() KubeAutoRefreshToggle() end,
   kubeAction = kubeAction,
   join = join,
   setup = function(opts)
-    vim.api.nvim_create_user_command("KubeList",function() M.kubeList() end, {})
-    vim.api.nvim_create_user_command("KubeDescribe",function() M.kubeDescribe() end, {})
-    vim.api.nvim_create_user_command("KubeLogs",function() M.kubeLogs() end, {})
-    vim.api.nvim_create_user_command("KubeEdit",function() M.kubeEdit() end, {})
-    vim.api.nvim_create_user_command("KubeExec",function() M.kubeExec() end, {})
+    vim.api
+        .nvim_create_user_command("KubeList", function() M.kubeList() end, {})
+    vim.api.nvim_create_user_command("KubeDescribe",
+      function() M.kubeDescribe() end, {})
+    vim.api
+        .nvim_create_user_command("KubeLogs", function() M.kubeLogs() end, {})
+    vim.api
+        .nvim_create_user_command("KubeEdit", function() M.kubeEdit() end, {})
+    vim.api
+        .nvim_create_user_command("KubeExec", function() M.kubeExec() end, {})
+    vim.api.nvim_create_user_command("KubeRefresh",
+      function() M.kubeRefresh() end, {})
+    vim.api.nvim_create_user_command("KubeRefreshToggle",
+      function() M.kubeRefreshToggle() end, {})
   end,
 }
 return M
